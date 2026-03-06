@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ask_clean() {
+  local label="$1" path="$2" size
+  if [[ -d "$path" ]]; then
+    size="$(du -sh "$path" 2>/dev/null | cut -f1)"
+    read -rp "  Delete $label ($size)? [y/N] " answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      rm -rf "$path"
+      echo "    Deleted $label ($size)"
+    else
+      echo "    Skipped"
+    fi
+  fi
+}
+
+scan_dir() {
+  local dir="$1"
+  local found=0
+
+  # Rust
+  if [[ -f "$dir/Cargo.toml" ]]; then
+    echo "  == Rust project =="
+    ask_clean "target/" "$dir/target"
+    found=1
+  fi
+
+  # Node.js
+  if [[ -f "$dir/package.json" ]]; then
+    echo "  == Node.js project =="
+    ask_clean "node_modules/" "$dir/node_modules"
+    ask_clean ".next/" "$dir/.next"
+    ask_clean "dist/" "$dir/dist"
+    ask_clean ".turbo/" "$dir/.turbo"
+    ask_clean ".parcel-cache/" "$dir/.parcel-cache"
+    found=1
+  fi
+
+  # Python
+  if [[ -f "$dir/pyproject.toml" || -f "$dir/setup.py" || -f "$dir/requirements.txt" ]]; then
+    echo "  == Python project =="
+    ask_clean ".venv/" "$dir/.venv"
+    ask_clean "venv/" "$dir/venv"
+    ask_clean "__pycache__/" "$dir/__pycache__"
+    ask_clean ".mypy_cache/" "$dir/.mypy_cache"
+    ask_clean ".pytest_cache/" "$dir/.pytest_cache"
+    ask_clean ".ruff_cache/" "$dir/.ruff_cache"
+    found=1
+  fi
+
+  # Elixir
+  if [[ -f "$dir/mix.exs" ]]; then
+    echo "  == Elixir project =="
+    ask_clean "_build/" "$dir/_build"
+    ask_clean "deps/" "$dir/deps"
+    found=1
+  fi
+
+  # Go
+  if [[ -f "$dir/go.mod" ]]; then
+    echo "  == Go project =="
+    ask_clean "vendor/" "$dir/vendor"
+    found=1
+  fi
+
+  # Swift / Xcode
+  if compgen -G "$dir/*.xcodeproj" >/dev/null 2>&1 || compgen -G "$dir/*.xcworkspace" >/dev/null 2>&1 || [[ -f "$dir/Package.swift" ]]; then
+    echo "  == Xcode/Swift project =="
+    ask_clean ".build/" "$dir/.build"
+    ask_clean "DerivedData/" "$dir/DerivedData"
+    ask_clean "Pods/" "$dir/Pods"
+    found=1
+  fi
+
+  # Flutter / Dart
+  if [[ -f "$dir/pubspec.yaml" ]]; then
+    echo "  == Flutter/Dart project =="
+    ask_clean ".dart_tool/" "$dir/.dart_tool"
+    ask_clean "build/" "$dir/build"
+    found=1
+  fi
+
+  # No project marker at top level — scan subdirectories
+  if [[ "$found" -eq 0 ]]; then
+    echo "  No project file found. Scanning subdirectories..."
+    for sub in "$dir"/*/; do
+      [[ -d "$sub" ]] || continue
+      local has_project=0
+      for marker in Cargo.toml package.json pyproject.toml setup.py mix.exs go.mod Package.swift pubspec.yaml; do
+        [[ -f "$sub/$marker" ]] && has_project=1 && break
+      done
+      if [[ "$has_project" -eq 1 ]]; then
+        echo ""
+        echo "--- $(basename "$sub") ---"
+        scan_dir "$sub"
+      fi
+    done
+  fi
+}
+
+list_and_pick() {
+  local base="$1"
+  local dirs=()
+  local i=1
+
+  # Collect subdirectories sorted by modification time (newest first)
+  while IFS= read -r d; do
+    dirs+=("$d")
+  done < <(ls -trd "$base"/*/ 2>/dev/null | sed 's:/$::')
+
+  if [[ ${#dirs[@]} -eq 0 ]]; then
+    echo "No subdirectories found in $base"
+    return
+  fi
+
+  echo ""
+  echo "Calculating reclaimable space..."
+  echo ""
+  printf "  %-4s %-30s %-14s %s\n" "#" "Directory" "Last modified" "Reclaimable"
+  printf "  %-4s %-30s %-14s %s\n" "---" "------------------------------" "--------------" "-----------"
+  for d in "${dirs[@]}"; do
+    local name modified reclaimable
+    name="$(basename "$d")"
+    modified="$(stat -f '%Sm' -t '%b %d %Y' "$d")"
+
+    # Calculate reclaimable space from known cruft dirs
+    local cruft_dirs=(target node_modules .next dist .turbo .parcel-cache .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache _build deps vendor .build DerivedData Pods .dart_tool build)
+    local total=0
+    for c in "${cruft_dirs[@]}"; do
+      if [[ -d "$d/$c" ]]; then
+        local bytes
+        bytes="$(du -sk "$d/$c" 2>/dev/null | cut -f1)"
+        total=$((total + bytes))
+      fi
+    done
+
+    if [[ "$total" -gt 0 ]]; then
+      if [[ "$total" -gt 1048576 ]]; then
+        reclaimable="$(echo "scale=1; $total / 1048576" | bc)G"
+      elif [[ "$total" -gt 1024 ]]; then
+        reclaimable="$(echo "scale=0; $total / 1024" | bc)M"
+      else
+        reclaimable="${total}K"
+      fi
+    else
+      reclaimable="-"
+    fi
+
+    printf "  %-4s %-30s %-14s %s\n" "$i" "$name" "$modified" "$reclaimable"
+    ((i++))
+  done
+
+  echo ""
+  echo "Enter numbers to clean (e.g. 1 3 5), 'a' for all, or 'q' to quit:"
+  read -rp "> " selection
+
+  [[ "$selection" == "q" ]] && return
+
+  # Strip commas so "8, 16, 17" and "8 16 17" both work
+  selection="${selection//,/ }"
+
+  local indices=()
+  if [[ "$selection" == "a" ]]; then
+    for ((j=0; j<${#dirs[@]}; j++)); do
+      indices+=("$j")
+    done
+  else
+    for num in $selection; do
+      if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#dirs[@]} )); then
+        indices+=("$((num - 1))")
+      fi
+    done
+  fi
+
+  for idx in "${indices[@]}"; do
+    local d="${dirs[$idx]}"
+    echo ""
+    echo "--- $(basename "$d") ---"
+    scan_dir "$d"
+  done
+}
+
+# Handle subcommands
+case "${1:-}" in
+  ls)
+    base="${2:-.}"
+    base="$(cd "$base" && pwd)"
+    list_and_pick "$base"
+    ;;
+  *)
+    # Default to current directory if no args
+    if [[ $# -eq 0 ]]; then
+      set -- "."
+    fi
+    for arg in "$@"; do
+      dir="$(cd "$arg" && pwd)"
+      echo "Scanning $dir ..."
+      scan_dir "$dir"
+      echo ""
+    done
+    ;;
+esac
