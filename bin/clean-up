@@ -181,8 +181,14 @@ list_and_pick() {
   done
 }
 
+VERSION="1.1.0"
+
 # Handle subcommands
 case "${1:-}" in
+  -v|--version)
+    echo "clean-up $VERSION"
+    exit 0
+    ;;
   ls)
     base="${2:-.}"
     base="$(cd "$base" && pwd)"
