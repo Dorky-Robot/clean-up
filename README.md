@@ -1,5 +1,7 @@
 # clean-up
 
+[![Discord](https://img.shields.io/discord/1483879594619568291?color=5865F2&label=Discord&logo=discord&logoColor=white)](https://discord.gg/QSdjPhbU)
+
 Interactive CLI to reclaim disk space from project build artifacts, caches, and dependencies.
 
 Detects project type automatically and asks before deleting anything.
